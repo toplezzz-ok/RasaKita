@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="theme-color" content="#176b4d" />
+  <meta name="description" content="RasaKita — pesan makanan favoritmu dengan mudah." />
+  <title>RasaKita</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="#" aria-label="RasaKita Beranda"><span class="brand-mark">R</span><span>Rasa<span class="brand-accent">Kita</span></span></a>
+    <div class="top-actions">
+      <button class="icon-button" id="orders-shortcut" aria-label="Pesanan saya">▤</button>
+      <button class="cart-button" id="cart-shortcut">Keranjang <span id="cart-count">0</span></button>
+      <button class="profile-button" id="auth-shortcut">Masuk</button>
+    </div>
+  </header>
+
+  <main>
+    <section class="hero">
+      <div class="hero-copy">
+        <span class="eyebrow"><span class="live-dot"></span> HANGAT, LEZAT, UNTUKMU</span>
+        <h1>Rasa enak,<br><em>tinggal pesan.</em></h1>
+        <p>Temukan makanan favoritmu dan nikmati kemudahan memesan dari satu tempat.</p>
+        <a class="primary-button hero-cta" href="#menu">Jelajahi menu <span>↗</span></a>
+      </div>
+      <div class="hero-art" aria-label="Ilustrasi makanan">
+        <div class="hero-orbit orbit-one"></div><div class="hero-orbit orbit-two"></div>
+     
+<div class="hero-image">
+  <img
+    src="./images/nasigoreng.png"
+    alt="Nasi goreng spesial RasaKita"
+    class="hero-food-photo"
+  />
+
+</div>
+
+    </section>
+
+    <section class="welcome-strip">
+      <div><span class="strip-icon">✦</span><span><strong>Menu pilihan</strong><small>Favorit untuk setiap suasana</small></span></div>
+      <div><span class="strip-icon">◷</span><span><strong>Pesan praktis</strong><small>Proses jelas dan sederhana</small></span></div>
+      <div><span class="strip-icon">♡</span><span><strong>Rasa istimewa</strong><small>Selalu dekat denganmu</small></span></div>
+    </section>
+
+    <section class="menu-section" id="menu">
+      <div class="section-heading">
+        <div><span class="eyebrow">PILIHAN HARI INI</span><h2>Temukan <em>favoritmu</em></h2><p>Menu pilihan yang siap menemani harimu.</p></div>
+        <div class="search-wrap"><span>⌕</span><input id="search-input" type="search" placeholder="Cari menu..." aria-label="Cari menu" /></div>
+      </div>
+      <div class="category-row" id="category-row">
+        <button class="category-chip active" data-category="Semua">Semua menu</button>
+        <button class="category-chip" data-category="Makanan">🍛 Makanan</button>
+        <button class="category-chip" data-category="Minuman">🥤 Minuman</button>
+        <button class="category-chip" data-category="Snack">🍟 Snack</button>
+      </div>
+      <div id="menu-grid" class="menu-grid"><div class="loading-state">Menyiapkan menu RasaKita...</div></div>
+    </section>
+
+    <section class="how-section">
+      <div><span class="eyebrow">MUDAH DALAM TIGA LANGKAH</span><h2>Dari kami,<br><em>untuk perut bahagia.</em></h2></div>
+      <div class="steps">
+        <article><span>01</span><h3>Pilih menu</h3><p>Temukan makanan dan minuman favoritmu.</p></article>
+        <article><span>02</span><h3>Checkout</h3><p>Isi alamat, pilih pembayaran, lalu konfirmasi pesanan.</p></article>
+        <article><span>03</span><h3>Pantau pesanan</h3><p>Lihat status pesananmu langsung dari halaman ini.</p></article>
+      </div>
+    </section>
+  </main>
+
+  <footer><a class="brand footer-brand" href="#"><span class="brand-mark">R</span><span>Rasa<span class="brand-accent">Kita</span></span></a><p>Rasa yang dekat, cerita yang hangat.</p><small>© <span id="year"></span> RasaKita. Demo proyek e-commerce.</small></footer>
+
+  <div class="modal-backdrop" id="modal-backdrop" hidden>
+    <section class="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+      <button class="modal-close" id="modal-close" aria-label="Tutup">×</button>
+      <div id="modal-content"></div>
+    </section>
+  </div>
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+
+  <script type="module" src="app.js"></script>
+</body>
+</html>

@@ -1,0 +1,26 @@
+
+{
+  "rules": {
+    ".read": false,
+    ".write": false,
+    "products": {
+      ".read": true,
+      "$productId": {
+        ".write": "auth != null && root.child('users').child(auth.uid).child('role').val() === 'admin'"
+      }
+    },
+    "users": {
+      "$uid": {
+        ".read": "auth != null && (auth.uid === $uid || root.child('users').child(auth.uid).child('role').val() === 'admin')",
+        ".write": "auth != null && ((auth.uid === $uid && !data.exists() && newData.child('role').val() === 'customer') || (root.child('users').child(auth.uid).child('role').val() === 'admin'))"
+      }
+    },
+    "orders": {
+      ".indexOn": ["customerId", "driverId", "createdAt"],
+      "$orderId": {
+        ".read": "auth != null && (data.child('customerId').val() === auth.uid || data.child('driverId').val() === auth.uid || root.child('users').child(auth.uid).child('role').val() === 'admin')",
+        ".write": "auth != null && ((!data.exists() && newData.child('customerId').val() === auth.uid && newData.child('status').val() === 'Menunggu verifikasi pembayaran' && newData.child('paymentStatus').val() === 'Menunggu verifikasi admin') || (root.child('users').child(auth.uid).child('role').val() === 'admin') || (data.child('driverId').val() === auth.uid && newData.child('driverId').val() === auth.uid && newData.child('customerId').val() === data.child('customerId').val() && newData.child('total').val() === data.child('total').val() && newData.child('items').val() === data.child('items').val()))"
+      }
+    }
+  }
+}
