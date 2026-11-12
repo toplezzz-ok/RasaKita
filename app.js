@@ -1457,87 +1457,237 @@ async function showManageOrders(selectedFilter = "Semua") {
 
 
 
+
 function showDriver() {
   if (profile?.role !== "driver" || !currentUser) {
     showToast("Akses khusus driver.");
     return;
   }
 
-  const list = Object.entries(orders || {}).sort(
-    (a, b) => (b[1].assignedAt || b[1].createdAt || 0) - (a[1].assignedAt || a[1].createdAt || 0)
+  const list = Object.entries(orders || {}).filter(
+    ([id, order]) => order.driverId === currentUser.uid
+  ).sort(
+    (a, b) => (b[1].assignedAt || b[1].createdAt || 0) -
+              (a[1].assignedAt || a[1].createdAt || 0)
   );
 
   const actionFor = (id, order) => {
     if (order.status === "Menunggu driver") {
       return `<button class="small-action green" data-driver-action="accept" data-order-id="${escapeHtml(id)}">Terima tugas</button>`;
     }
+
     if (order.status === "Pesanan diterima driver") {
       return `<button class="small-action green" data-driver-action="start" data-order-id="${escapeHtml(id)}">Mulai pengantaran</button>`;
     }
+
     if (order.status === "Dalam pengantaran") {
-      return `<button class="small-action green" data-driver-action="finish" data-order-id="${escapeHtml(id)}">Tandai selesai</button>`;
+      return `
+        <div class="driver-proof-actions">
+          ${
+            order.deliveryProofUrl
+              ? `<a class="small-action green" href="${escapeHtml(order.deliveryProofUrl)}" target="_blank" rel="noopener noreferrer">Lihat foto bukti</a>`
+              : `<button class="small-action green" data-upload-proof="${escapeHtml(id)}">📷 Upload foto bukti</button>`
+          }
+          <button class="small-action green" data-driver-action="finish" data-order-id="${escapeHtml(id)}">Tandai selesai</button>
+        </div>
+      `;
     }
-    if (order.status === "Selesai") return `<span class="driver-complete">✓ Pengantaran selesai</span>`;
+
+    if (order.status === "Selesai") {
+      return `<span class="driver-complete">✓ Pengantaran selesai</span>`;
+    }
+
     return `<small class="driver-waiting">Status: ${escapeHtml(statusLabel(order.status))}</small>`;
   };
 
   openModal(`
     <div class="driver-panel-head">
-      <div><span class="eyebrow">RASAKITA DELIVERY</span><h2 id="modal-title">Halo, ${escapeHtml(profile.name || "Driver")}!</h2></div>
+      <div>
+        <span class="eyebrow">RASAKITA DELIVERY</span>
+        <h2 id="modal-title">Halo, ${escapeHtml(profile.name || "Driver")}!</h2>
+      </div>
       <span class="driver-count">${list.length} tugas</span>
     </div>
+
     <p class="subtext">Daftar pesanan yang ditugaskan admin kepadamu. Perbarui status sesuai proses pengantaran.</p>
+
     ${list.length ? list.map(([id, order]) => `
       <article class="order-card driver-order-card">
         <div class="order-card-head">
           <strong>#${escapeHtml(id.slice(-6).toUpperCase())}</strong>
           <span class="status-pill">${escapeHtml(statusLabel(order.status))}</span>
         </div>
-        <div class="driver-customer"><strong>${escapeHtml(order.customerName || "Pelanggan")}</strong><a href="tel:${escapeHtml(order.phone || "")}">${escapeHtml(order.phone || "Nomor tidak tersedia")}</a></div>
+
+        <div class="driver-customer">
+          <strong>${escapeHtml(order.customerName || "Pelanggan")}</strong>
+          <a href="tel:${escapeHtml(order.phone || "")}">
+            ${escapeHtml(order.phone || "Nomor tidak tersedia")}
+          </a>
+        </div>
+
         <p class="driver-address">📍 ${escapeHtml(order.address || "Alamat tidak tersedia")}</p>
-        <div class="driver-order-meta"><span>${Object.values(order.items || {}).length} item</span><strong>${money(order.total)}</strong></div>
-        <div class="driver-action-row">${actionFor(id, order)}</div>
+
+        <div class="driver-order-meta">
+          <span>${Object.values(order.items || {}).length} item</span>
+          <strong>${money(order.total)}</strong>
+        </div>
+
+        ${order.deliveryProofUrl ? `
+          <p class="driver-proof-saved">✓ Foto bukti sudah diunggah</p>
+        ` : ""}
+
+        <div class="driver-action-row">
+          ${actionFor(id, order)}
+        </div>
       </article>
-    `).join("") : `<div class="empty-state">Belum ada tugas pengantaran. Pesanan yang ditugaskan admin akan muncul di sini.</div>`}
+    `).join("") : `
+      <div class="empty-state">
+        Belum ada tugas pengantaran. Pesanan yang ditugaskan admin akan muncul di sini.
+      </div>
+    `}
+
     <button class="text-button" id="driver-refresh">Muat ulang tugas</button>
     <button class="text-button" id="driver-back">Kembali ke akun</button>
   `);
 
   $("#driver-back").addEventListener("click", showAccount);
   $("#driver-refresh").addEventListener("click", showDriver);
+
+  // Upload foto bukti ke Cloudinary
+  $("#modal-content").querySelectorAll("[data-upload-proof]").forEach(button => {
+    button.addEventListener("click", () => {
+      const id = button.dataset.uploadProof;
+      const order = orders[id];
+
+      if (!order || order.driverId !== currentUser.uid) {
+        showToast("Pesanan tidak ditemukan.");
+        return;
+      }
+
+      const fileInput = document.createElement("input");
+      fileInput.type = "file";
+      fileInput.accept = "image/jpeg,image/png,image/webp";
+      fileInput.capture = "environment";
+
+      fileInput.addEventListener("change", async () => {
+        const file = fileInput.files?.[0];
+        if (!file) return;
+
+        if (!["image/jpeg", "image/png", "image/webp"].includes(file.type)) {
+          showToast("Gunakan foto JPG, PNG, atau WebP.");
+          return;
+        }
+
+        if (file.size > 5 * 1024 * 1024) {
+          showToast("Ukuran foto maksimal 5 MB.");
+          return;
+        }
+
+        button.disabled = true;
+        button.textContent = "Mengunggah foto...";
+
+        try {
+          const formData = new FormData();
+      formData.append("file", file);
+formData.append("upload_preset", "rasakita_delivery");
+
+          const response = await fetch(
+            "https://api.cloudinary.com/v1_1/kdwxgee1/image/upload",
+            {
+              method: "POST",
+              body: formData
+            }
+          );
+
+          const result = await response.json();
+
+          if (!response.ok || !result.secure_url) {
+            throw new Error(result.error?.message || "Upload Cloudinary gagal.");
+          }
+
+          await update(ref(db, `orders/${id}`), {
+            deliveryProofUrl: result.secure_url,
+            deliveryProofPublicId: result.public_id,
+            deliveryProofUploadedAt: Date.now(),
+            updatedAt: Date.now()
+          });
+
+          showToast("Foto bukti berhasil diunggah!");
+          showDriver();
+
+        } catch (error) {
+          console.error("Upload bukti pengantaran gagal:", error);
+          showToast("Gagal mengunggah foto: " + error.message);
+          button.disabled = false;
+          button.textContent = "📷 Upload foto bukti";
+        }
+      });
+
+      fileInput.click();
+    });
+  });
+
+  // Perubahan status pesanan
   $("#modal-content").querySelectorAll("[data-driver-action]").forEach(button => {
     button.addEventListener("click", async () => {
       const id = button.dataset.orderId;
       const action = button.dataset.driverAction;
       const order = orders[id];
+
       if (!order || order.driverId !== currentUser.uid) {
         showToast("Tugas tidak ditemukan atau bukan milik akunmu.");
         return;
       }
+
       const transitions = {
-        accept: { from: "Menunggu driver", to: "Pesanan diterima driver", timestamp: "driverAcceptedAt" },
-        start: { from: "Pesanan diterima driver", to: "Dalam pengantaran", timestamp: "deliveryStartedAt" },
-        finish: { from: "Dalam pengantaran", to: "Selesai", timestamp: "deliveredAt" }
+        accept: {
+          from: "Menunggu driver",
+          to: "Pesanan diterima driver",
+          timestamp: "driverAcceptedAt"
+        },
+        start: {
+          from: "Pesanan diterima driver",
+          to: "Dalam pengantaran",
+          timestamp: "deliveryStartedAt"
+        },
+        finish: {
+          from: "Dalam pengantaran",
+          to: "Selesai",
+          timestamp: "deliveredAt"
+        }
       };
+
       const transition = transitions[action];
+
       if (!transition || order.status !== transition.from) {
         showToast("Status pesanan sudah berubah. Muat ulang tugas.");
         return;
       }
+
       try {
+        button.disabled = true;
+
         await update(ref(db, `orders/${id}`), {
           status: transition.to,
           [transition.timestamp]: Date.now(),
           updatedAt: Date.now()
         });
-        showToast(action === "finish" ? "Pengantaran selesai. Terima kasih!" : "Status tugas berhasil diperbarui.");
-        // Realtime listener updates orders; redraw after the write completes.
+
+        showToast(
+          action === "finish"
+            ? "Pengantaran selesai. Terima kasih!"
+            : "Status tugas berhasil diperbarui."
+        );
+
         showDriver();
+
       } catch (error) {
         console.error("Gagal memperbarui tugas driver:", error);
         showToast("Gagal memperbarui status. Periksa Firebase Rules.");
+        button.disabled = false;
       }
     });
   });
 }
+
 
