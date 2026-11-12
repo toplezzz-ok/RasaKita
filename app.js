@@ -1,6 +1,6 @@
 import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.0/firebase-app.js";
 import { getAuth, onAuthStateChanged, createUserWithEmailAndPassword, signInWithEmailAndPassword, signOut } from "https://www.gstatic.com/firebasejs/11.6.0/firebase-auth.js";
-import { getDatabase, ref, onValue, get, set, push, update, remove } from "https://www.gstatic.com/firebasejs/11.6.0/firebase-database.js";
+import { getDatabase, ref, onValue, get, set, push, update, remove, query, orderByChild, equalTo } from "https://www.gstatic.com/firebasejs/11.6.0/firebase-database.js";
 import { firebaseConfig } from "./firebase-config.js";
 
 const $ = (s) => document.querySelector(s);
@@ -137,6 +137,8 @@ const demoProducts = [
 
 let app, auth, db, firebaseReady=false, currentUser=null, profile=null, products={}, orders={}, cart={};
 let activeCategory="Semua", searchText="", authMode="login", toastTimer;
+let driverProfiles = {};
+let ordersUnsubscribe = null;
 
 function showToast(message){const t=$("#toast");t.textContent=message;t.classList.add("show");clearTimeout(toastTimer);toastTimer=setTimeout(()=>t.classList.remove("show"),2800)}
 function openModal(html){$("#modal-content").innerHTML=html;$("#modal-backdrop").hidden=false;document.body.style.overflow="hidden"}
@@ -150,18 +152,16 @@ if(isConfigured()){
  try{
   app=initializeApp(firebaseConfig);auth=getAuth(app);db=getDatabase(app);firebaseReady=true;
   onAuthStateChanged(auth,async user=>{
-   currentUser=user;profile=null;
+   if (ordersUnsubscribe) { ordersUnsubscribe(); ordersUnsubscribe = null; }
+   currentUser=user;profile=null;orders={};knownOrderIds=null;
    if(user){try{const snap=await get(ref(db,`users/${user.uid}`));profile=snap.exists()?snap.val():{name:user.email?.split("@")[0]||"Customer",role:"customer"};}catch(e){console.error(e)}}
-  
-updateAuthButton();
-subscribeProducts();
 
-if (user && profile?.role === "admin") {
-  subscribeOrders();
-} else {
-  orders = {};
-  knownOrderIds = null;
-}
+   updateAuthButton();
+   subscribeProducts();
+
+   if (user && profile?.role === "admin") subscribeOrders();
+   else if (user && profile?.role === "driver") subscribeAssignedOrders("driverId", user.uid);
+   else if (user) subscribeAssignedOrders("customerId", user.uid);
 
   });
  }catch(e){console.error(e);showToast("Konfigurasi Firebase belum benar.")}
@@ -297,7 +297,7 @@ async function subscribeOrders() {
 
   let initialized = false;
 
-  onValue(
+  ordersUnsubscribe = onValue(
     ref(db, "orders"),
     snap => {
       const updatedOrders = snap.val() || {};
@@ -335,6 +335,26 @@ async function subscribeOrders() {
     },
     error => {
       console.error("Gagal memantau pesanan:", error);
+    }
+  );
+}
+
+
+// Customer and driver only receive their own orders through constrained queries.
+function subscribeAssignedOrders(field, uid) {
+  const ownOrdersQuery = query(ref(db, "orders"), orderByChild(field), equalTo(uid));
+  ordersUnsubscribe = onValue(
+    ownOrdersQuery,
+    snapshot => {
+      orders = snapshot.val() || {};
+      // Perbarui tampilan pelanggan secara realtime saat admin/driver mengubah status.
+      if (profile?.role === "customer" && document.getElementById("my-orders-live")) {
+        renderMyOrdersContent();
+      }
+    },
+    error => {
+      console.error(`Gagal memuat pesanan ${field}:`, error);
+      showToast("Gagal memuat pesanan akun ini. Periksa Firebase Rules.");
     }
   );
 }
@@ -751,112 +771,100 @@ function createPaymentWhatsAppLink(orderId, order) {
 
 function statusLabel(s){return s||"Menunggu verifikasi pembayaran"}
 
+// Hanya tampilkan tautan bukti dari domain delivery Cloudinary yang kita gunakan.
+function deliveryProofLink(url) {
+  const value = String(url || "").trim();
+  if (!value) return "";
+  try {
+    const parsed = new URL(value);
+    if (parsed.protocol !== "https:" || parsed.hostname !== "res.cloudinary.com") return "";
+    return parsed.href;
+  } catch {
+    return "";
+  }
+}
+
+function deliveryProofView(order) {
+  const url = deliveryProofLink(order?.deliveryProofUrl);
+  if (!url) return "";
+  return `
+    <div class="delivery-proof-box">
+      <strong>📸 Bukti pengantaran</strong>
+      <p>Driver telah mengunggah foto bukti pesanan.</p>
+      <a class="small-action green" href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer">Lihat foto bukti</a>
+    </div>
+  `;
+}
+
+function customerOrderProgress(status) {
+  if (status === "Dibatalkan") {
+    return `<div class="customer-order-cancelled">Pesanan dibatalkan</div>`;
+  }
+
+  const stages = [
+    { label: "Pesanan diterima", statuses: ["Menunggu verifikasi pembayaran", "Menunggu verifikasi admin", "Pesanan diproses", "Menunggu driver", "Dalam pengantaran", "Selesai"] },
+    { label: "Diproses", statuses: ["Pesanan diproses", "Menunggu driver", "Dalam pengantaran", "Selesai"] },
+    { label: "Menunggu driver", statuses: ["Menunggu driver", "Dalam pengantaran", "Selesai"] },
+    { label: "Dalam pengantaran", statuses: ["Dalam pengantaran", "Selesai"] },
+    { label: "Selesai", statuses: ["Selesai"] }
+  ];
+  const activeIndex = stages.reduce((last, stage, index) => stage.statuses.includes(status) ? index : last, 0);
+  return `<div class="customer-progress" aria-label="Progres pesanan">${stages.map((stage, index) => `
+    <div class="customer-progress-step ${index <= activeIndex ? "is-done" : ""} ${index === activeIndex ? "is-current" : ""}">
+      <span class="customer-progress-dot">${index < activeIndex ? "✓" : index + 1}</span>
+      <span>${stage.label}</span>
+    </div>`).join("")}</div>`;
+}
+
+function renderMyOrdersContent() {
+  const container = document.getElementById("my-orders-live");
+  if (!container || !currentUser) return;
+
+  const list = Object.entries(orders || {})
+    .filter(([, order]) => order.customerId === currentUser.uid)
+    .sort((a, b) => (Number(b[1].createdAt) || 0) - (Number(a[1].createdAt) || 0));
+
+  container.innerHTML = list.length ? list.map(([id, order]) => {
+    const verified = order.paymentStatus === "Terverifikasi admin";
+    const items = Object.values(order.items || {});
+    const status = statusLabel(order.status);
+    return `
+      <article class="order-card customer-tracking-card">
+        <div class="order-card-head">
+          <strong>Pesanan #${escapeHtml(id.slice(-6).toUpperCase())}</strong>
+          <span class="status-pill">${escapeHtml(status)}</span>
+        </div>
+        <p class="customer-order-date">${order.createdAt ? new Date(Number(order.createdAt)).toLocaleString("id-ID", { dateStyle: "medium", timeStyle: "short" }) : "Waktu pemesanan tidak tersedia"}</p>
+        ${customerOrderProgress(status)}
+        <div class="order-items">
+          ${items.length ? items.map(item => `<div class="order-item-row"><span>${escapeHtml(item.name || "Menu")}</span><span>× ${Number(item.quantity) || 0}</span></div>`).join("") : `<p>Detail menu tidak tersedia.</p>`}
+        </div>
+        <div class="payment-box">
+          <strong>Status pembayaran</strong>
+          <p>${escapeHtml(order.paymentStatus || "Menunggu verifikasi admin")}</p>
+          <strong>Metode pembayaran</strong>
+          <p>${escapeHtml(order.paymentMethod || "-")}</p>
+        </div>
+        <div class="order-total-row"><span>Total pembayaran</span><strong>${money(order.total)}</strong></div>
+        ${verified ? `<div class="payment-box">✓ Pembayaran telah diverifikasi admin.</div>` : `<a class="primary-button full-button" href="${createPaymentWhatsAppLink(id, order)}" target="_blank" rel="noopener noreferrer" style="display:flex;align-items:center;justify-content:center;text-decoration:none;margin-top:12px">Konfirmasi via WhatsApp</a>`}
+      </article>`;
+  }).join("") : `<div class="empty-state">Belum ada pesanan. Yuk, pilih menu favoritmu!</div>`;
+}
+
 function showMyOrders() {
   if (!currentUser) {
     showAuth();
     return;
   }
 
-  const list = Object.entries(orders || {})
-    .filter(([id, order]) => order.customerId === currentUser.uid)
-    .sort(
-      (a, b) =>
-        (b[1].createdAt || 0) - (a[1].createdAt || 0)
-    );
-
   openModal(`
     <h2 id="modal-title">Pesanan saya</h2>
-    <p class="subtext">
-      Pantau status pesanan dan pembayaranmu di sini.
-    </p>
-
-    ${
-      list.length
-        ? list.map(([id, order]) => {
-            const verified =
-              order.paymentStatus === "Terverifikasi admin";
-
-            const items = Object.values(order.items || {});
-
-            return `
-              <article class="order-card">
-                <div class="order-card-head">
-                  <strong>
-                    Pesanan #${escapeHtml(id.slice(-6).toUpperCase())}
-                  </strong>
-
-                  <span class="status-pill">
-                    ${escapeHtml(statusLabel(order.status))}
-                  </span>
-                </div>
-
-                <div class="order-items">
-                  ${
-                    items.length
-                      ? items.map(item => `
-                          <div class="order-item-row">
-                            <span>${escapeHtml(item.name || "Menu")}</span>
-                            <span>× ${Number(item.quantity) || 0}</span>
-                          </div>
-                        `).join("")
-                      : `<p>Detail menu tidak tersedia.</p>`
-                  }
-                </div>
-
-                <div class="payment-box">
-                  <strong>Status pembayaran</strong>
-                  <p>
-                    ${escapeHtml(
-                      order.paymentStatus ||
-                      "Menunggu verifikasi admin"
-                    )}
-                  </p>
-
-                  <strong>Metode pembayaran</strong>
-                  <p>
-                    ${escapeHtml(order.paymentMethod || "-")}
-                  </p>
-                </div>
-
-                <div class="order-total-row">
-                  <span>Total pembayaran</span>
-                  <strong>${money(order.total)}</strong>
-                </div>
-
-                ${
-                  verified
-                    ? `
-                      <div class="payment-box">
-                        ✓ Pembayaran telah diverifikasi admin.
-                      </div>
-                    `
-                    : `
-                      <a
-                        class="primary-button full-button"
-                        href="${createPaymentWhatsAppLink(id, order)}"
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        style="display:flex;align-items:center;justify-content:center;text-decoration:none;margin-top:12px"
-                      >
-                        Konfirmasi via WhatsApp
-                      </a>
-                    `
-                }
-              </article>
-            `;
-          }).join("")
-        : `
-          <div class="empty-state">
-            Belum ada pesanan. Yuk, pilih menu favoritmu!
-          </div>
-        `
-    }
-
-    <button class="text-button" id="orders-close">
-      Kembali ke menu
-    </button>
+    <p class="subtext">Pantau status pesananmu secara langsung di sini. Status akan berubah otomatis ketika admin atau driver memperbarui pesanan.</p>
+    <div id="my-orders-live"><div class="empty-state">Memuat pesanan...</div></div>
+    <button class="text-button" id="orders-close">Kembali ke menu</button>
   `);
 
+  renderMyOrdersContent();
   $("#orders-close").addEventListener("click", closeModal);
 }
 
@@ -870,67 +878,139 @@ function showAdmin() {
     return;
   }
 
-  const newOrderCount = unreadOrderIds.size;
+  // Dashboard admin dibuat sebagai halaman penuh agar lebih nyaman
+  // digunakan di desktop, tanpa mengubah alur pelanggan.
+  closeModal();
+  document.getElementById("admin-dashboard")?.remove();
 
-  openModal(`
-    <h2 id="modal-title">Dashboard Admin</h2>
+  const orderRows = Object.entries(orders || {})
+    .sort((a, b) => (b[1].createdAt || 0) - (a[1].createdAt || 0));
+  const totalOrders = orderRows.length;
+  const waitingOrders = orderRows.filter(([, o]) =>
+    ["Menunggu verifikasi pembayaran", "Menunggu verifikasi admin"].includes(o.status) ||
+    o.paymentStatus !== "Terverifikasi admin"
+  ).length;
+  const deliveryOrders = orderRows.filter(([, o]) =>
+    ["Menunggu driver", "Dalam pengantaran"].includes(o.status)
+  ).length;
+  const completedOrders = orderRows.filter(([, o]) => o.status === "Selesai").length;
+  const revenue = orderRows
+    .filter(([, o]) => o.paymentStatus === "Terverifikasi admin" && o.status !== "Dibatalkan")
+    .reduce((sum, [, o]) => sum + (Number(o.total) || 0), 0);
+  const recentRows = orderRows.slice(0, 5);
 
-    <p class="subtext">
-      Kelola produk dan verifikasi pembayaran pesanan.
-    </p>
+  const root = document.createElement("section");
+  root.id = "admin-dashboard";
+  root.className = "admin-dashboard";
+  root.innerHTML = `
+    <aside class="admin-sidebar">
+      <a class="admin-brand" href="#admin-home"><span class="brand-mark">R</span><span>Rasa<span>Kita</span><small>ADMIN PANEL</small></span></a>
+      <div class="admin-profile"><div class="admin-avatar">${escapeHtml((profile?.name || "A").slice(0,1).toUpperCase())}</div><div><strong>${escapeHtml(profile?.name || "Administrator")}</strong><small>Administrator</small></div></div>
+      <p class="admin-nav-label">MENU UTAMA</p>
+      <nav class="admin-nav">
+        <button class="admin-nav-item active" id="admin-nav-home"><span>▦</span> Dashboard</button>
+        <button class="admin-nav-item" id="admin-nav-orders"><span>▤</span> Pesanan ${unreadOrderIds.size ? `<b>${unreadOrderIds.size}</b>` : ""}</button>
+        <button class="admin-nav-item" id="admin-nav-products"><span>🍽</span> Manajemen Menu</button>
+        <button class="admin-nav-item" id="admin-nav-drivers"><span>♧</span> Manajemen Driver</button>
+      </nav>
+      <div class="admin-sidebar-bottom">
+        <button class="admin-nav-item" id="admin-nav-store"><span>↗</span> Lihat halaman toko</button>
+        <button class="admin-nav-item admin-logout" id="admin-nav-logout"><span>⇥</span> Keluar akun</button>
+      </div>
+    </aside>
 
-    <div class="admin-layout">
+    <main class="admin-main">
+      <header class="admin-topbar">
+        <div><span class="admin-kicker">RASAKITA MANAGEMENT</span><h1>Dashboard</h1><p>Selamat datang kembali, ${escapeHtml(profile?.name || "Admin")}! Berikut ringkasan tokomu.</p></div>
+        <div class="admin-top-actions"><span class="admin-date">${new Date().toLocaleDateString("id-ID", {weekday:"long",day:"numeric",month:"long",year:"numeric"})}</span><button class="admin-icon-btn" id="admin-refresh" title="Muat ulang">↻</button></div>
+      </header>
 
-      <button
-        class="primary-button full-button"
-        id="manage-products">
-        Kelola produk
-      </button>
+      <section class="admin-stat-grid">
+        <article class="admin-stat-card"><div class="admin-stat-icon orange">▤</div><div><span>Total Pesanan</span><strong>${totalOrders}</strong><small>Semua pesanan masuk</small></div></article>
+        <article class="admin-stat-card"><div class="admin-stat-icon amber">◷</div><div><span>Perlu Ditinjau</span><strong>${waitingOrders}</strong><small>Menunggu verifikasi</small></div></article>
+        <article class="admin-stat-card"><div class="admin-stat-icon blue">♧</div><div><span>Dalam Pengantaran</span><strong>${deliveryOrders}</strong><small>Pesanan berjalan</small></div></article>
+        <article class="admin-stat-card"><div class="admin-stat-icon green">✓</div><div><span>Pesanan Selesai</span><strong>${completedOrders}</strong><small>Berhasil diantarkan</small></div></article>
+      </section>
 
-      <button
-        class="primary-button full-button"
-        id="manage-orders">
-        Kelola pesanan
+      <section class="admin-revenue-card"><div><span>Estimasi pendapatan terverifikasi</span><strong>${money(revenue)}</strong><small>Dihitung dari pesanan terverifikasi dan tidak dibatalkan</small></div><div class="admin-revenue-mark">Rp</div></section>
 
-        ${
-          newOrderCount > 0
-            ? `<span class="order-badge">${newOrderCount}</span>`
-            : ""
-        }
-      </button>
+      <section class="admin-content-card">
+        <div class="admin-card-heading"><div><h2>Pesanan terbaru</h2><p>Pantau aktivitas pesanan yang baru masuk.</p></div><button class="admin-link-btn" id="admin-see-orders">Lihat semua pesanan →</button></div>
+        ${recentRows.length ? `<div class="admin-table-wrap"><table class="admin-table"><thead><tr><th>ID PESANAN</th><th>PELANGGAN</th><th>TANGGAL</th><th>STATUS</th><th>TOTAL</th></tr></thead><tbody>${recentRows.map(([id,o])=>`<tr><td><strong>#${escapeHtml(id.slice(-6).toUpperCase())}</strong></td><td>${escapeHtml(o.customerName || "Pelanggan")}</td><td>${o.createdAt ? new Date(o.createdAt).toLocaleDateString("id-ID") : "-"}</td><td><span class="admin-status">${escapeHtml(statusLabel(o.status))}</span></td><td><strong>${money(o.total)}</strong></td></tr>`).join("")}</tbody></table></div>` : `<div class="admin-empty"><span>▤</span><strong>Belum ada pesanan</strong><p>Pesanan pelanggan akan muncul di sini.</p></div>`}
+      </section>
+      <p class="admin-footer-note">RasaKita Admin · Kelola operasional tokomu dengan mudah.</p>
+    </main>
+  `;
+  document.body.appendChild(root);
 
-      <button
-        class="primary-button full-button"
-        id="seed-products">
-        Pasang 14 Menu Final
-      </button>
-
-      <button
-        class="text-button"
-        id="admin-back">
-        Kembali
-      </button>
-
-    </div>
-  `);
-
-  $("#manage-products").addEventListener(
-    "click",
-    showManageProducts
-  );
-
-  $("#manage-orders").addEventListener("click", () => {
-    showManageOrders();
+  $("#admin-nav-home").addEventListener("click", showAdmin);
+  $("#admin-nav-orders").addEventListener("click", () => showManageOrders());
+  $("#admin-see-orders").addEventListener("click", () => showManageOrders());
+  $("#admin-nav-products").addEventListener("click", showManageProducts);
+  $("#admin-nav-drivers").addEventListener("click", showManageDrivers);
+  $("#admin-nav-store").addEventListener("click", () => {
+    root.remove();
+    showAccount();
   });
-
-  $("#seed-products").addEventListener("click", () => {
-    seedRasaKitaProducts();
+  $("#admin-nav-logout").addEventListener("click", async () => {
+    if (!window.confirm("Keluar dari akun admin?")) return;
+    root.remove();
+    await signOut(auth);
+    showToast("Kamu sudah keluar.");
   });
+  $("#admin-refresh").addEventListener("click", () => {
+    showAdmin();
+    showToast("Dashboard diperbarui.");
+  });
+}
 
-  $("#admin-back").addEventListener(
-    "click",
-    showAccount
-  );
+async function showManageDrivers() {
+  if (profile?.role !== "admin") return showToast("Akses khusus admin.");
+  openModal(`<h2 id="modal-title">Manajemen Driver</h2>
+    <p class="subtext">Daftar akun yang sudah memiliki role driver di Firebase.</p>
+    <div class="empty-state">Memuat daftar driver...</div>
+    <button class="text-button" id="drivers-back">Kembali ke admin</button>`);
+  $("#drivers-back").addEventListener("click", showAdmin);
+
+  try {
+    const snapshot = await get(ref(db, "users"));
+    const users = snapshot.val() || {};
+    driverProfiles = Object.fromEntries(
+      Object.entries(users).filter(([uid, user]) => user?.role === "driver")
+    );
+    const drivers = Object.entries(driverProfiles);
+    const content = drivers.length ? drivers.map(([uid, driver]) => `
+      <article class="admin-item">
+        <div><strong>${escapeHtml(driver.name || "Driver")}</strong>
+          <p>${escapeHtml(driver.email || "Email tidak tercatat")}</p>
+          <small style="color:#9297a0">UID: ${escapeHtml(uid)}</small>
+        </div><span class="status-pill">Aktif</span>
+      </article>`).join("") : `
+      <div class="empty-state">Belum ada akun dengan role driver.</div>`;
+
+    $("#modal-content").innerHTML = `
+      <h2 id="modal-title">Manajemen Driver</h2>
+      <p class="subtext">${drivers.length} akun driver terdaftar. Admin dapat menugaskan mereka melalui halaman pesanan.</p>
+      ${content}
+      <div class="payment-box">
+        <strong>Menambahkan akun driver</strong>
+        <ol style="padding-left:18px;margin:8px 0">
+          <li>Buat akun email/password di Firebase Authentication.</li>
+          <li>Salin UID akun yang dibuat.</li>
+          <li>Di Realtime Database, buat <code>users/UID</code> dengan data <code>name</code>, <code>email</code>, dan <code>role: "driver"</code>.</li>
+        </ol>
+        <small>Jangan membuat akun driver dari browser admin. Pembuatan akun produksi sebaiknya memakai backend tepercaya/Cloud Functions.</small>
+      </div>
+      <button class="text-button" id="drivers-back">Kembali ke admin</button>`;
+    $("#drivers-back").addEventListener("click", showAdmin);
+  } catch (error) {
+    console.error("Gagal memuat driver:", error);
+    $("#modal-content").innerHTML = `
+      <h2 id="modal-title">Manajemen Driver</h2>
+      <div class="payment-box">Daftar akun tidak dapat dibaca. Periksa Firebase Realtime Database Rules: admin perlu izin membaca node <code>users</code>.</div>
+      <button class="text-button" id="drivers-back">Kembali ke admin</button>`;
+    $("#drivers-back").addEventListener("click", showAdmin);
+  }
 }
 
 function showManageProducts(){
@@ -1062,13 +1142,25 @@ function productForm(id) {
 
 
 
-function showManageOrders(selectedFilter = "Semua") {
+async function showManageOrders(selectedFilter = "Semua") {
   isOrdersModalOpen = true;
+  try {
+    if (!Object.keys(driverProfiles).length) {
+      const usersSnapshot = await get(ref(db, "users"));
+      const users = usersSnapshot.val() || {};
+      driverProfiles = Object.fromEntries(
+        Object.entries(users).filter(([uid, user]) => user?.role === "driver")
+      );
+    }
+  } catch (error) {
+    console.warn("Daftar driver belum dapat dimuat:", error);
+  }
 
   const orderStatuses = [
     "Menunggu verifikasi pembayaran",
     "Pesanan diproses",
     "Menunggu driver",
+    "Pesanan diterima driver",
     "Dalam pengantaran",
     "Selesai",
     "Dibatalkan"
@@ -1171,6 +1263,8 @@ function showManageOrders(selectedFilter = "Semua") {
                   }
                 </div>
 
+                ${deliveryProofView(order)}
+
                 <div class="form-field">
                   <label>Status pesanan</label>
                   <select data-order-status="${escapeHtml(id)}">
@@ -1183,6 +1277,21 @@ function showManageOrders(selectedFilter = "Semua") {
                     `).join("")}
                   </select>
                 </div>
+
+                ${verified && order.status !== "Dibatalkan" ? `
+                  <div class="form-field">
+                    <label>Driver pengantaran</label>
+                    <select data-order-driver="${escapeHtml(id)}">
+                      <option value="">${order.driverId ? "Lepas penugasan driver" : "Pilih driver"}</option>
+                      ${Object.entries(driverProfiles).map(([uid, driver]) => `
+                        <option value="${escapeHtml(uid)}" ${order.driverId === uid ? "selected" : ""}>
+                          ${escapeHtml(driver.name || driver.email || uid)}
+                        </option>
+                      `).join("")}
+                    </select>
+                    <button class="small-action green" data-assign-driver="${escapeHtml(id)}">Simpan penugasan</button>
+                  </div>
+                ` : ""}
 
                 <button
                   class="small-action green"
@@ -1208,6 +1317,39 @@ function showManageOrders(selectedFilter = "Semua") {
   $("#order-status-filter").addEventListener("change", event => {
     showManageOrders(event.target.value);
   });
+
+  // Penugasan driver oleh admin
+  $("#modal-content")
+    .querySelectorAll("[data-assign-driver]")
+    .forEach(button => {
+      button.addEventListener("click", async () => {
+        const id = button.dataset.assignDriver;
+        const order = orders[id];
+        const driverId = $(`[data-order-driver="${id}"]`).value;
+        if (!order) return showToast("Pesanan tidak ditemukan.");
+        if (order.paymentStatus !== "Terverifikasi admin") {
+          return showToast("Verifikasi pembayaran sebelum menugaskan driver.");
+        }
+        if (driverId && !driverProfiles[driverId]) {
+          return showToast("Driver tidak ditemukan. Muat ulang daftar driver.");
+        }
+        const driver = driverId ? driverProfiles[driverId] : null;
+        try {
+          await update(ref(db, `orders/${id}`), {
+            driverId: driverId || null,
+            driverName: driver?.name || driver?.email || null,
+            status: driverId ? "Menunggu driver" : "Pesanan diproses",
+            assignedAt: driverId ? Date.now() : null,
+            updatedAt: Date.now()
+          });
+          showToast(driverId ? "Driver berhasil ditugaskan." : "Penugasan driver dilepas.");
+          showManageOrders(selectedFilter);
+        } catch (error) {
+          console.error(error);
+          showToast("Gagal menyimpan penugasan. Periksa Firebase Rules.");
+        }
+      });
+    });
 
   // Verifikasi pembayaran
   $("#modal-content")
@@ -1315,12 +1457,87 @@ function showManageOrders(selectedFilter = "Semua") {
 
 
 
-function showDriver(){
- if(profile?.role!=="driver"){showToast("Akses khusus driver.");return}
- const list=Object.entries(orders).filter(([id,o])=>o.driverId===currentUser.uid);
- openModal(`<h2 id="modal-title">Tugas pengantaran</h2><p class="subtext">Pesanan yang ditugaskan admin kepadamu.</p>
- ${list.length?list.map(([id,o])=>`<article class="order-card"><div class="order-card-head"><strong>#${id.slice(-6).toUpperCase()}</strong><span class="status-pill">${escapeHtml(statusLabel(o.status))}</span></div><p>${escapeHtml(o.customerName||"")} · ${escapeHtml(o.phone||"")}<br>${escapeHtml(o.address||"")}</p><button class="small-action green" data-accept="${id}">Terima tugas</button></article>`).join(""):`<div class="empty-state">Belum ada tugas untukmu.</div>`}
- <button class="text-button" id="driver-back">Kembali</button>`);
- $("#driver-back").addEventListener("click",showAccount);
- $("#modal-content").querySelectorAll("[data-accept]").forEach(b=>b.addEventListener("click",async()=>{try{await update(ref(db,`orders/${b.dataset.accept}`),{status:"Dalam pengantaran",driverAcceptedAt:Date.now()});showToast("Tugas diterima.");showDriver()}catch(e){showToast("Gagal menerima tugas.")}}));
+function showDriver() {
+  if (profile?.role !== "driver" || !currentUser) {
+    showToast("Akses khusus driver.");
+    return;
+  }
+
+  const list = Object.entries(orders || {}).sort(
+    (a, b) => (b[1].assignedAt || b[1].createdAt || 0) - (a[1].assignedAt || a[1].createdAt || 0)
+  );
+
+  const actionFor = (id, order) => {
+    if (order.status === "Menunggu driver") {
+      return `<button class="small-action green" data-driver-action="accept" data-order-id="${escapeHtml(id)}">Terima tugas</button>`;
+    }
+    if (order.status === "Pesanan diterima driver") {
+      return `<button class="small-action green" data-driver-action="start" data-order-id="${escapeHtml(id)}">Mulai pengantaran</button>`;
+    }
+    if (order.status === "Dalam pengantaran") {
+      return `<button class="small-action green" data-driver-action="finish" data-order-id="${escapeHtml(id)}">Tandai selesai</button>`;
+    }
+    if (order.status === "Selesai") return `<span class="driver-complete">✓ Pengantaran selesai</span>`;
+    return `<small class="driver-waiting">Status: ${escapeHtml(statusLabel(order.status))}</small>`;
+  };
+
+  openModal(`
+    <div class="driver-panel-head">
+      <div><span class="eyebrow">RASAKITA DELIVERY</span><h2 id="modal-title">Halo, ${escapeHtml(profile.name || "Driver")}!</h2></div>
+      <span class="driver-count">${list.length} tugas</span>
+    </div>
+    <p class="subtext">Daftar pesanan yang ditugaskan admin kepadamu. Perbarui status sesuai proses pengantaran.</p>
+    ${list.length ? list.map(([id, order]) => `
+      <article class="order-card driver-order-card">
+        <div class="order-card-head">
+          <strong>#${escapeHtml(id.slice(-6).toUpperCase())}</strong>
+          <span class="status-pill">${escapeHtml(statusLabel(order.status))}</span>
+        </div>
+        <div class="driver-customer"><strong>${escapeHtml(order.customerName || "Pelanggan")}</strong><a href="tel:${escapeHtml(order.phone || "")}">${escapeHtml(order.phone || "Nomor tidak tersedia")}</a></div>
+        <p class="driver-address">📍 ${escapeHtml(order.address || "Alamat tidak tersedia")}</p>
+        <div class="driver-order-meta"><span>${Object.values(order.items || {}).length} item</span><strong>${money(order.total)}</strong></div>
+        <div class="driver-action-row">${actionFor(id, order)}</div>
+      </article>
+    `).join("") : `<div class="empty-state">Belum ada tugas pengantaran. Pesanan yang ditugaskan admin akan muncul di sini.</div>`}
+    <button class="text-button" id="driver-refresh">Muat ulang tugas</button>
+    <button class="text-button" id="driver-back">Kembali ke akun</button>
+  `);
+
+  $("#driver-back").addEventListener("click", showAccount);
+  $("#driver-refresh").addEventListener("click", showDriver);
+  $("#modal-content").querySelectorAll("[data-driver-action]").forEach(button => {
+    button.addEventListener("click", async () => {
+      const id = button.dataset.orderId;
+      const action = button.dataset.driverAction;
+      const order = orders[id];
+      if (!order || order.driverId !== currentUser.uid) {
+        showToast("Tugas tidak ditemukan atau bukan milik akunmu.");
+        return;
+      }
+      const transitions = {
+        accept: { from: "Menunggu driver", to: "Pesanan diterima driver", timestamp: "driverAcceptedAt" },
+        start: { from: "Pesanan diterima driver", to: "Dalam pengantaran", timestamp: "deliveryStartedAt" },
+        finish: { from: "Dalam pengantaran", to: "Selesai", timestamp: "deliveredAt" }
+      };
+      const transition = transitions[action];
+      if (!transition || order.status !== transition.from) {
+        showToast("Status pesanan sudah berubah. Muat ulang tugas.");
+        return;
+      }
+      try {
+        await update(ref(db, `orders/${id}`), {
+          status: transition.to,
+          [transition.timestamp]: Date.now(),
+          updatedAt: Date.now()
+        });
+        showToast(action === "finish" ? "Pengantaran selesai. Terima kasih!" : "Status tugas berhasil diperbarui.");
+        // Realtime listener updates orders; redraw after the write completes.
+        showDriver();
+      } catch (error) {
+        console.error("Gagal memperbarui tugas driver:", error);
+        showToast("Gagal memperbarui status. Periksa Firebase Rules.");
+      }
+    });
+  });
 }
+
